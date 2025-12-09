@@ -34,7 +34,7 @@ if not HF_TOKEN:
 # CONFIGURACIÓN DEL MODELO Y API
 # =========================
 # Cambiamos Falcon por un modelo soportado en la API pública
-MODEL_ID = "meta-llama/Llama-2-7b-chat-hf"  
+MODEL_ID = "HuggingFaceH4/zephyr-7b-beta"
 API_URL = f"https://router.huggingface.co/models/{MODEL_ID}"
 
 def hf_generate(prompt, max_tokens=300, temperature=0.9):
