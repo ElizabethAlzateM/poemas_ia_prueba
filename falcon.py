@@ -35,7 +35,7 @@ if not HF_TOKEN:
 # =========================
 # Cambiamos Falcon por un modelo soportado en la API pública
 MODEL_ID = "mistralai/Mistral-7B-Instruct-v0.2"  
-API_URL = f"https://api-inference.huggingface.co/models/{MODEL_ID}"
+API_URL = f"https://router.huggingface.co/models/{MODEL_ID}"
 
 def hf_generate(prompt, max_tokens=300, temperature=0.9):
     """Cliente HTTP para Hugging Face API con manejo de errores."""
