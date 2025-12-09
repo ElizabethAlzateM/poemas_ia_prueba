@@ -6,7 +6,7 @@ import requests
 import traceback
 
 # =========================
-# CONFIGURACIÓN DE LA PÁGINA Y ESTILOS
+# CONFIGURACIÓN DE LA PÁGINA
 # =========================
 st.set_page_config(
     page_title="Generador de Poemas con IA",
@@ -17,7 +17,6 @@ st.set_page_config(
 # =========================
 # DIAGNÓSTICO Y CARGA INICIAL
 # =========================
-
 csv_path = "poems_clean.csv"
 df = None
 try:
@@ -31,20 +30,18 @@ if not HF_TOKEN:
     st.sidebar.warning("⚠️ HF_TOKEN no encontrado. Configúralo como variable de entorno o en st.secrets['HF_TOKEN'].")
 
 # =========================
-# CONFIGURACIÓN DEL MODELO Y API (Router)
+# CONFIGURACIÓN DEL MODELO Y ROUTER
 # =========================
-# Nuevo endpoint: https://router.huggingface.co/models/{model_id}
-DEFAULT_MODEL_ID = "HuggingFaceH4/zephyr-7b-beta"
-FALLBACK_MODEL_ID = "gpt2"
+MODEL_ID = "HuggingFaceH4/zephyr-7b-beta"  # principal
+FALLBACK_MODEL_ID = "gpt2"                  # respaldo
 
 def router_url(model_id: str) -> str:
     return f"https://router.huggingface.co/models/{model_id}"
 
-def hf_generate(prompt, model_id=DEFAULT_MODEL_ID, max_tokens=300, temperature=0.9, return_full_text=False, provider=None):
+def hf_generate(prompt, model_id=MODEL_ID, max_tokens=300, temperature=0.9, return_full_text=False):
     """
-    Cliente HTTP para el Hugging Face Router con manejo de errores y fallback.
-    - Usa 'inputs' y 'parameters' (kwarg de pipelines).
-    - Opcional: 'provider' para forzar infra (ej.: 'hf-inference' o 'together').
+    Cliente HTTP para Hugging Face Router con manejo de errores y fallback.
+    - Payload: 'inputs' + 'parameters' (kwargs de pipelines).
     """
     headers = {
         "Authorization": f"Bearer {HF_TOKEN}",
@@ -57,81 +54,65 @@ def hf_generate(prompt, model_id=DEFAULT_MODEL_ID, max_tokens=300, temperature=0
             "max_new_tokens": max_tokens,
             "temperature": temperature,
             "return_full_text": return_full_text,
-            # Puedes añadir: top_p, top_k, repetition_penalty...
+            # opcionales: top_p, top_k, repetition_penalty, etc.
         }
     }
-    # Selección opcional de proveedor (si quieres forzar uno específico soportado por el Router)
-    if provider:
-        payload["provider"] = provider  # p.ej. "hf-inference" si está disponible
 
     try:
         resp = requests.post(router_url(model_id), headers=headers, json=payload, timeout=180)
         resp.raise_for_status()
         data = resp.json()
 
-        # El Router mantiene el formato de 'generated_text' en modelos de text-generation.
-        if isinstance(data, list) and data and "generated_text" in data[0]:
-            return data[0]["generated_text"], model_id
-        elif isinstance(data, dict) and "generated_text" in data:
-            return data["generated_text"], model_id
-
-        # Intento genérico por si el proveedor devuelve clave distinta
+        # El Router mantiene 'generated_text' para text-generation
         if isinstance(data, list) and data and isinstance(data[0], dict):
-            for k in ("generated_text", "text", "output_text"):
+            if "generated_text" in data[0]:
+                return data[0]["generated_text"], model_id, False
+            # intento genérico por si el proveedor devuelve clave distinta
+            for k in ("text", "output_text"):
                 if k in data[0]:
-                    return data[0][k], model_id
+                    return data[0][k], model_id, False
 
-        return "Error: Respuesta inesperada del Router.", model_id
+        elif isinstance(data, dict) and "generated_text" in data:
+            return data["generated_text"], model_id, False
+
+        return "Error: Respuesta inesperada del Router.", model_id, False
 
     except requests.HTTPError as e:
         status_code = e.response.status_code
 
-        # 404: el modelo no está disponible con el proveedor que tocó -> intenta fallback
+        # 404: el modelo no está disponible -> fallback
         if status_code == 404 and model_id != FALLBACK_MODEL_ID:
-            st.info(f"ℹ️ 404 con {model_id}. Cambiando a modelo de respaldo: {FALLBACK_MODEL_ID}.")
-            return hf_generate(prompt, model_id=FALLBACK_MODEL_ID, max_tokens=max_tokens,
-                               temperature=temperature, return_full_text=return_full_text, provider=provider)
+            # Avisamos que activamos fallback
+            st.info(f"ℹ️ 404 con **{model_id}**. Cambiando a modelo de respaldo: **{FALLBACK_MODEL_ID}**.")
+            return hf_generate(prompt, model_id=FALLBACK_MODEL_ID,
+                               max_tokens=max_tokens, temperature=temperature,
+                               return_full_text=return_full_text)
 
-        # 410: llamada antigua al api-inference (deprecada) -> mensaje claro
+        # 503: servicio no disponible (cold start)
+        if status_code == 503:
+            return "💔 **503**: el modelo está cargando o no acepta tráfico ahora (Cold Start).", model_id, False
+
+        # 410: si alguna llamada antigua llega a api-inference (deprecado)
         if status_code == 410:
             return ("⚠️ El endpoint api-inference.huggingface.co fue deprecado. "
-                    "Usa https://router.huggingface.co/models/{model_id}."), model_id
-
-        # 503: Cold start / servicio no disponible
-        if status_code == 503:
-            return "💔 **503**: el modelo está cargando o no acepta tráfico ahora (Cold Start).", model_id
+                    "Usa https://router.huggingface.co/models/{model_id}."), model_id, False
 
         # Otros errores HTTP
-        return f"🚨 Error HTTP del Router: {status_code} - {e.response.text}", model_id
+        return f"🚨 Error HTTP del Router: {status_code} - {e.response.text}", model_id, False
 
     except requests.exceptions.Timeout:
-        return "⏰ **Timeout**: el modelo tardó demasiado en responder.", model_id
+        return "⏰ **Timeout**: el modelo tardó demasiado en responder.", model_id, False
     except Exception as e:
-        return "🚨 Error inesperado durante la generación.\n" + "".join(traceback.format_exception(e)), model_id
+        return "🚨 Error inesperado durante la generación.\n" + "".join(traceback.format_exception(e)), model_id, False
 
 # =========================
 # INTERFAZ STREAMLIT
 # =========================
-
 st.title("✍️ IA Generativa de Poemas en Español")
 
-model_choice = st.sidebar.selectbox(
-    "Modelo (Router)",
-    options=[DEFAULT_MODEL_ID, "meta-llama/Llama-2-7b-chat-hf", FALLBACK_MODEL_ID],
-    index=0,
-    help="Si eliges Llama 2, acepta su licencia en el Hub y usa tu token con permisos."
-)
-
-provider_choice = st.sidebar.selectbox(
-    "Proveedor (opcional)",
-    options=["(auto)", "hf-inference", "together", "fireworks", "perplexity"],
-    index=0,
-    help="El Router puede enrutar a distintos proveedores cuando el modelo lo soporta."
-)
-provider_value = None if provider_choice == "(auto)" else provider_choice
-
 st.markdown(f"""
-Aplicación generativa de poemas en español usando el modelo **{model_choice}** (vía Hugging Face **Router**).
+Aplicación generativa de poemas en español usando **{MODEL_ID}** (vía Hugging Face Router).
+Si no está disponible, se aplicará fallback automático a **{FALLBACK_MODEL_ID}**.
 """)
 
 st.subheader("Configuración de la Generación")
@@ -154,6 +135,7 @@ if st.button("✨ Generar Poema", type="primary"):
     elif df is None or df.empty:
         st.error("El dataset de poemas no se cargó correctamente.")
     else:
+        # 1) Preparar ejemplos y prompt
         ejemplos = df['content'].dropna().sample(min(3, len(df))).tolist()
         ejemplos_texto = "\n".join([f"- {e.strip()[:200]}..." for e in ejemplos])
 
@@ -167,22 +149,29 @@ Inspírate en el estilo (sin copiar) de estos ejemplos:
 Ahora escribe el poema:
 """.strip()
 
+        # 2) Generar con spinner
         st.subheader(f"Resultado: Poema '{estilo}' sobre '{tema}'")
         with st.spinner("⏳ La IA está escribiendo... Esto puede tardar varios segundos."):
-            poem, used_model = hf_generate(
+            poem, used_model, used_fallback_flag = hf_generate(
                 prompt,
-                model_id=model_choice,
+                model_id=MODEL_ID,
                 max_tokens=300,
                 temperature=0.9,
-                return_full_text=False,
-                provider=provider_value
+                return_full_text=False
             )
 
+        # 3) Mostrar resultado y avisos
         st.success(f"✅ Generación completada con **{used_model}**.")
+        if used_model == FALLBACK_MODEL_ID:
+            st.warning("🔁 Se activó el **fallback** al modelo de respaldo (gpt2) porque el principal no estaba disponible.")
+
         st.markdown("---")
         st.markdown(poem)
         st.markdown("---")
 
+# =========================
+# AYUDA SOBRE ESTILOS
+# =========================
 st.markdown("""
 ---
 ### Estilos Disponibles:
